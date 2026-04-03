@@ -1,5 +1,9 @@
 # fire
 
+> **Key:** `b328b572bcaa583c95a51dc2a0a1c08ff1f4ab12f661f6f12135a1c4554fa1af`
+> **Nonce:** `db9193f8f5471bb365296b5b`
+> **Last updated:** `never`
+
 all credits to [Switch3301](https://github.com/Switch3301/) for the xal key fetcher/extractor and token generator.
 
 Please Join : https://discord.gg/jsreversing
@@ -24,12 +28,6 @@ shuffle order and chacha nonce are derived from the random u32 embedded in each 
 3. `node gen.js` — spits out a ready-to-use xal token
 
 key rotates daily so grab a fresh xal.js each time.
-
-## current key
-
-> **Key:** `b328b572bcaa583c95a51dc2a0a1c08ff1f4ab12f661f6f12135a1c4554fa1af`
-> **Nonce:** `db9193f8f5471bb365296b5b`
-> **Last updated:** `never`
 
 ### debug tools
 
