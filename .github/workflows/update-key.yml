@@ -2,7 +2,7 @@ name: Update Talon SDK Key
 
 on:
   schedule:
-    - cron: '*/5 * * * *'
+    - cron: '* * * * *'
   workflow_dispatch:
 
 permissions:
