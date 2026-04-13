@@ -420,6 +420,51 @@ if (nonceCode) {
   } catch (e) { console.log("nonce eval failed: " + e.message) }
 }
 
+if (!config.nonce) {
+  traverse(cleanAst, { noScope: true, VariableDeclarator(p) {
+    if (config.nonce) return p.stop()
+    let init = p.node.init
+    if (!t.isNewExpression(init)) return
+    if (!t.isIdentifier(init.callee, { name: "Uint32Array" })) return
+    if (init.arguments.length !== 1 || !t.isArrayExpression(init.arguments[0])) return
+    let elems = init.arguments[0].elements
+    if (elems.length !== 3) return
+    let vals = []
+    for (let el of elems) {
+      if (t.isNumericLiteral(el)) { vals.push(el.value); continue }
+      if (t.isUnaryExpression(el, { operator: "-" }) && t.isNumericLiteral(el.argument))
+        { vals.push(-el.argument.value); continue }
+      return
+    }
+    try {
+      let nonce = new Uint32Array(vals)
+      config.nonce = Array.from(nonce).map(v => (v >>> 0).toString(16).padStart(8, "0")).join("")
+      console.log("init nonce (var): " + config.nonce)
+    } catch (e) { console.log("nonce var eval failed: " + e.message) }
+  }})
+}
+
+// fallback: nonce inside SequenceExpression (helper_obj, new Uint32Array([computed, computed, literal]))
+if (!config.nonce) {
+  traverse(cleanAst, { noScope: true, SequenceExpression(p) {
+    if (config.nonce) return p.stop()
+    let exprs = p.node.expressions
+    let newExpr = exprs.find(e =>
+      t.isNewExpression(e) && t.isIdentifier(e.callee, { name: "Uint32Array" }) &&
+      e.arguments.length === 1 && t.isArrayExpression(e.arguments[0]) &&
+      e.arguments[0].elements.length === 3)
+    if (!newExpr) return
+    try {
+      let seqCode = generate(p.node).code
+      let nonce = vm.runInContext("(" + seqCode + ")", vmCtx)
+      if (!(nonce instanceof Uint32Array) || nonce.length !== 3) return
+      config.nonce = Array.from(nonce).map(v => (v >>> 0).toString(16).padStart(8, "0")).join("")
+      console.log("init nonce (seq): " + config.nonce)
+      p.stop()
+    } catch (e) {}
+  }})
+}
+
 if (config.key) {
   let cfgPath = path.join(root, "config.json")
   fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2))
