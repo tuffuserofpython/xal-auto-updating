@@ -1,7 +1,7 @@
 # fire
 
-> **Key:** `d691bdae9b73dcb65d865721a506c752d0fafddf4704222408bf62ebb246d992`
-> **Nonce:** `802bd91981a88fd1b682aa1f`
-> **Last updated:** `2026-07-18 17:29:03 UTC`
+> **Key:** `4399f131c3e69476bf4165c5e8ee9c18f2e73543829a25281bfe6dda74391493`
+> **Nonce:** ``
+> **Last updated:** `2026-07-18 18:26:54 UTC`
 
 all credits to [Switch3301](https://github.com/Switch3301/) for the xal key fetcher/extractor and token generator.
