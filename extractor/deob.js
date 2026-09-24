@@ -366,107 +366,133 @@ console.log(out + " | " + ch + " changes")
 let cleanAst = parser.parse(cleanCode, { sourceType: "script", allowReturnOutsideFunction: true })
 let config = {}
 
-function checkFnBody(node, typeName, arrLen) {
-  if (!t.isBlockStatement(node.body)) return false
+// --- key/nonce extraction ---------------------------------------------------
+// talon ships the chacha20 key and the initial nonce as plain numeric arrays.
+// the wrapper changes between builds: older xal.js used `new Uint8Array([...])`
+// and `new Uint32Array([...])`, newer ones use `Array.from([...])`. accept both.
+
+function numLit(n) {
+  if (t.isNumericLiteral(n)) return n.value
+  if (t.isUnaryExpression(n, { operator: "-" }) && t.isNumericLiteral(n.argument)) return -n.argument.value
+  return null
+}
+
+// returns the element nodes when `node` builds an array of exactly `arrLen` items
+function arrayElems(node, arrLen) {
+  let arr = null
+  if (t.isNewExpression(node) && t.isIdentifier(node.callee) &&
+      (node.callee.name === "Uint8Array" || node.callee.name === "Uint32Array") &&
+      node.arguments.length === 1 && t.isArrayExpression(node.arguments[0])) {
+    arr = node.arguments[0]
+  } else if (t.isCallExpression(node) && t.isMemberExpression(node.callee) &&
+      !node.callee.computed &&
+      t.isIdentifier(node.callee.object, { name: "Array" }) &&
+      t.isIdentifier(node.callee.property, { name: "from" }) &&
+      node.arguments.length >= 1 && t.isArrayExpression(node.arguments[0])) {
+    arr = node.arguments[0]
+  }
+  if (!arr || arr.elements.length !== arrLen) return null
+  return arr.elements
+}
+
+function checkFnBody(node, arrLen) {
+  if (!t.isBlockStatement(node.body)) {
+    return node.body ? !!arrayElems(node.body, arrLen) : false
+  }
   for (let stmt of node.body.body) {
     if (!t.isReturnStatement(stmt) || !stmt.argument) continue
-    let arg = stmt.argument
-    if (!t.isNewExpression(arg)) continue
-    if (!t.isIdentifier(arg.callee, { name: typeName })) continue
-    if (arg.arguments.length !== 1 || !t.isArrayExpression(arg.arguments[0])) continue
-    if (arg.arguments[0].elements.length === arrLen) return true
+    if (arrayElems(stmt.argument, arrLen)) return true
   }
   return false
 }
 
-function findFnReturning(typeName, arrLen) {
+function findFnReturning(arrLen, accept) {
   let match
-  traverse(cleanAst, { noScope: true,
-    FunctionExpression(p) {
-      if (match) return p.stop()
-      if (checkFnBody(p.node, typeName, arrLen)) {
-        match = generate(p.node).code
-        return p.stop()
-      }
-    },
-    ArrowFunctionExpression(p) {
-      if (match) return p.stop()
-      if (checkFnBody(p.node, typeName, arrLen)) {
-        match = generate(p.node).code
-        return p.stop()
-      }
-    }
-  })
+  function visit(p) {
+    if (match) return p.stop()
+    if (!checkFnBody(p.node, arrLen)) return
+    let code = generate(p.node).code
+    if (accept && !accept(code)) return
+    match = code
+    p.stop()
+  }
+  traverse(cleanAst, { noScope: true, FunctionExpression: visit, ArrowFunctionExpression: visit, FunctionDeclaration: visit })
   return match
 }
 
 let vmCtx = vm.createContext({ Uint8Array, Uint32Array, DataView, ArrayBuffer, Math })
 
-let keyCode = findFnReturning("Uint8Array", 32)
-if (keyCode) {
-  try {
-    let key = vm.runInContext("(" + keyCode + ")()", vmCtx)
-    config.key = Array.from(key, b => b.toString(16).padStart(2, "0")).join("")
-    console.log("chacha key: " + config.key)
-  } catch (e) { console.log("key eval failed: " + e.message) }
+function evalArray(code) {
+  return vm.runInContext("(" + code + ")()", vmCtx)
 }
 
-let nonceCode = findFnReturning("Uint32Array", 3)
+function toBytes(v) {
+  let a = Array.from(v)
+  if (a.length !== 32) return null
+  for (let b of a) if (!Number.isInteger(b) || b < 0 || b > 0xff) return null
+  return a.map(b => b.toString(16).padStart(2, "0")).join("")
+}
+
+function toNonce(v) {
+  let a = Array.from(v)
+  if (a.length !== 3) return null
+  return a.map(x => (x >>> 0).toString(16).padStart(8, "0")).join("")
+}
+
+let keyCode = findFnReturning(32, code => {
+  try { return toBytes(evalArray(code)) !== null } catch { return false }
+})
+if (keyCode) {
+  try {
+    config.key = toBytes(evalArray(keyCode))
+    console.log("chacha key: " + config.key)
+  } catch (e) { console.log("key eval failed: " + e.message) }
+} else {
+  console.log("key not found")
+}
+
+let nonceCode = findFnReturning(3, code => {
+  try { return toNonce(evalArray(code)) !== null } catch { return false }
+})
 if (nonceCode) {
   try {
-    let nonce = vm.runInContext("(" + nonceCode + ")()", vmCtx)
-    config.nonce = Array.from(nonce).map(v => (v >>> 0).toString(16).padStart(8, "0")).join("")
+    config.nonce = toNonce(evalArray(nonceCode))
     console.log("init nonce: " + config.nonce)
   } catch (e) { console.log("nonce eval failed: " + e.message) }
 }
 
+// fallback: nonce built inline, not wrapped in a function -- e.g.
+// `(n = Array.from([-1032052491, 0x77156c42, 0x1f61e998]))[0] = ...`
+// only literal triples with at least one large value qualify, so small
+// unrelated 3-element arrays are ignored.
 if (!config.nonce) {
-  traverse(cleanAst, { noScope: true, VariableDeclarator(p) {
+  traverse(cleanAst, { noScope: true, enter(p) {
     if (config.nonce) return p.stop()
-    let init = p.node.init
-    if (!t.isNewExpression(init)) return
-    if (!t.isIdentifier(init.callee, { name: "Uint32Array" })) return
-    if (init.arguments.length !== 1 || !t.isArrayExpression(init.arguments[0])) return
-    let elems = init.arguments[0].elements
-    if (elems.length !== 3) return
+    let elems = arrayElems(p.node, 3)
+    if (!elems) return
     let vals = []
     for (let el of elems) {
-      if (t.isNumericLiteral(el)) { vals.push(el.value); continue }
-      if (t.isUnaryExpression(el, { operator: "-" }) && t.isNumericLiteral(el.argument))
-        { vals.push(-el.argument.value); continue }
-      return
+      let v = numLit(el)
+      if (v === null) return
+      vals.push(v)
     }
-    try {
-      let nonce = new Uint32Array(vals)
-      config.nonce = Array.from(nonce).map(v => (v >>> 0).toString(16).padStart(8, "0")).join("")
-      console.log("init nonce (var): " + config.nonce)
-    } catch (e) { console.log("nonce var eval failed: " + e.message) }
+    if (!vals.some(v => Math.abs(v) > 0xffff)) return
+    config.nonce = toNonce(vals)
+    console.log("init nonce (inline): " + config.nonce)
+    p.stop()
   }})
 }
 
-// fallback: nonce inside SequenceExpression (helper_obj, new Uint32Array([computed, computed, literal]))
-if (!config.nonce) {
-  traverse(cleanAst, { noScope: true, SequenceExpression(p) {
-    if (config.nonce) return p.stop()
-    let exprs = p.node.expressions
-    let newExpr = exprs.find(e =>
-      t.isNewExpression(e) && t.isIdentifier(e.callee, { name: "Uint32Array" }) &&
-      e.arguments.length === 1 && t.isArrayExpression(e.arguments[0]) &&
-      e.arguments[0].elements.length === 3)
-    if (!newExpr) return
-    try {
-      let seqCode = generate(p.node).code
-      let nonce = vm.runInContext("(" + seqCode + ")", vmCtx)
-      if (!(nonce instanceof Uint32Array) || nonce.length !== 3) return
-      config.nonce = Array.from(nonce).map(v => (v >>> 0).toString(16).padStart(8, "0")).join("")
-      console.log("init nonce (seq): " + config.nonce)
-      p.stop()
-    } catch (e) {}
-  }})
-}
+if (!config.nonce) console.log("nonce not found")
 
 if (config.key) {
   let cfgPath = path.join(root, "config.json")
   fs.writeFileSync(cfgPath, JSON.stringify(config, null, 2))
   console.log("config: " + cfgPath)
+  // gen.js/gen1.js read config2.json; keep the mirror in sync when it exists
+  let cfg2Path = path.join(root, "config2.json")
+  if (fs.existsSync(cfg2Path)) {
+    fs.writeFileSync(cfg2Path, JSON.stringify(config, null, 2))
+    console.log("config: " + cfg2Path)
+  }
 }
